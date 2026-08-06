@@ -1,0 +1,12 @@
+{
+  "ID": "e26f57a32e7f41078c21093a3a8f0940",
+  "ActionKeyword": "tk",
+  "Name": "Tarkov",
+  "Description": "Цены предметов Escape from Tarkov по данным tarkov.dev — поиск по русским названиям",
+  "Author": "tofurahie",
+  "Version": "1.0.0",
+  "Language": "csharp",
+  "Website": "https://github.com/Shetofu-AI/flow-tarkov",
+  "IcoPath": "Images\\icon.png",
+  "ExecuteFileName": "Flow.Launcher.Plugin.Tarkov.dll"
+}
