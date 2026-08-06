@@ -99,6 +99,7 @@ namespace Flow.Launcher.Plugin.Tarkov
 
         private List<Result> Search(string search, CancellationToken token)
         {
+            string phonetic = Phonetics.Key(search);
             List<TarkovItem> matched = new List<TarkovItem>();
             List<int> scores = new List<int>();
 
@@ -109,7 +110,12 @@ namespace Flow.Launcher.Plugin.Tarkov
                     return new List<Result>();
                 }
 
-                int score = _context.API.FuzzySearch(search, item.SearchText).Score;
+                int score = ItemScorer.Score(item, phonetic);
+                if (score == 0)
+                {
+                    score = Math.Min(_context.API.FuzzySearch(search, item.SearchText).Score, ItemScorer.FUZZY_LIMIT);
+                }
+
                 if (score <= 0)
                 {
                     continue;

@@ -17,6 +17,7 @@ namespace Flow.Launcher.Plugin.Tarkov
         private DateTimeOffset _blockedUntil = DateTimeOffset.MinValue;
         private Task? _refresh;
         private string _lastError = string.Empty;
+        private string _etag = string.Empty;
 
         public ItemIndex(TarkovApi api, string cachePath)
         {
@@ -53,6 +54,7 @@ namespace Flow.Launcher.Plugin.Tarkov
                 PrepareSearchText(cache.Items);
                 _items = cache.Items;
                 _updatedAt = cache.UpdatedAt;
+                _etag = cache.Etag;
             }
             catch (Exception exception)
             {
@@ -88,9 +90,14 @@ namespace Flow.Launcher.Plugin.Tarkov
         {
             try
             {
-                List<TarkovItem> fetched = await _api.FetchItemsAsync(CancellationToken.None);
-                PrepareSearchText(fetched);
-                _items = fetched;
+                ItemsSnapshot snapshot = await _api.FetchItemsAsync(_etag, CancellationToken.None);
+                if (!snapshot.NotModified)
+                {
+                    PrepareSearchText(snapshot.Items);
+                    _items = snapshot.Items;
+                }
+
+                _etag = snapshot.Etag;
                 _updatedAt = DateTimeOffset.UtcNow;
                 _blockedUntil = DateTimeOffset.MinValue;
                 _lastError = string.Empty;
@@ -123,6 +130,7 @@ namespace Flow.Launcher.Plugin.Tarkov
 
                 CacheFile cache = new CacheFile();
                 cache.UpdatedAt = _updatedAt;
+                cache.Etag = _etag;
                 cache.Items = _items;
 
                 string temporaryPath = _cachePath + ".tmp";
@@ -142,6 +150,8 @@ namespace Flow.Launcher.Plugin.Tarkov
         private class CacheFile
         {
             public DateTimeOffset UpdatedAt { get; set; }
+
+            public string Etag { get; set; } = string.Empty;
 
             public List<TarkovItem> Items { get; set; } = new List<TarkovItem>();
         }

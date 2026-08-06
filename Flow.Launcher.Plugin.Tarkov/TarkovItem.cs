@@ -37,11 +37,23 @@ namespace Flow.Launcher.Plugin.Tarkov
         [JsonIgnore]
         public string SearchText { get; private set; } = string.Empty;
 
+        [JsonIgnore]
+        public string PhoneticName { get; private set; } = string.Empty;
+
+        [JsonIgnore]
+        public string PhoneticShortName { get; private set; } = string.Empty;
+
+        [JsonIgnore]
+        public string PhoneticSearchText { get; private set; } = string.Empty;
+
         public int Slots => Math.Max(1, Width * Height);
 
         public void PrepareSearchText()
         {
             SearchText = $"{Name} {ShortName} {NormalizedName.Replace('-', ' ')}";
+            PhoneticName = Phonetics.Key(Name);
+            PhoneticShortName = Phonetics.Key(ShortName);
+            PhoneticSearchText = Phonetics.Key(SearchText);
         }
     }
 }

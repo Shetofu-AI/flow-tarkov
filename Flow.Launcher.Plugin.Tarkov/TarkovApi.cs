@@ -1,78 +1,156 @@
+using System.Net;
 using System.Net.Http;
-using System.Text;
 using System.Text.Json;
 
 namespace Flow.Launcher.Plugin.Tarkov
 {
     public class TarkovApi
     {
-        private const string ENDPOINT = "https://api.tarkov.dev/graphql";
-        private const string FLEA_MARKET_VENDOR = "flea-market";
+        private const string BASE_URL = "https://json.tarkov.dev/";
+        private const string GAME_MODE = "regular";
+        private const string LANGUAGE = "ru";
+        private const string ITEMS_DATASET = "items";
+        private const string TRADERS_DATASET = "traders";
         private const string NO_FLEA_TYPE = "noFlea";
-        private const string QUERY =
-            "{items(lang:ru){id name shortName normalizedName basePrice width height iconLink link wikiLink types " +
-            "avg24hPrice lastLowPrice sellFor{priceRUB vendor{normalizedName name}}}}";
+        private const string TRADER_NAME_SUFFIX = " Nickname";
 
         private readonly HttpClient _client;
 
         public TarkovApi()
         {
-            _client = new HttpClient();
-            _client.Timeout = TimeSpan.FromSeconds(60);
+            HttpClientHandler handler = new HttpClientHandler();
+            handler.AutomaticDecompression = DecompressionMethods.All;
+
+            _client = new HttpClient(handler);
+            _client.Timeout = TimeSpan.FromMinutes(2);
             _client.DefaultRequestHeaders.Add("User-Agent", "Flow.Launcher.Plugin.Tarkov");
+            _client.DefaultRequestHeaders.Add("Accept", "application/json");
         }
 
-        public async Task<List<TarkovItem>> FetchItemsAsync(CancellationToken token)
+        public async Task<ItemsSnapshot> FetchItemsAsync(string etag, CancellationToken token)
         {
-            string payload = JsonSerializer.Serialize(new { query = QUERY });
-            using StringContent body = new StringContent(payload, Encoding.UTF8, "application/json");
+            using HttpRequestMessage request = new HttpRequestMessage(HttpMethod.Get, BuildUrl(ITEMS_DATASET));
+            if (!string.IsNullOrEmpty(etag))
+            {
+                request.Headers.TryAddWithoutValidation("If-None-Match", etag);
+            }
 
-            using HttpResponseMessage response = await _client.PostAsync(ENDPOINT, body, token);
+            using HttpResponseMessage response = await _client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token);
+            if (response.StatusCode == HttpStatusCode.NotModified)
+            {
+                ItemsSnapshot unchanged = new ItemsSnapshot();
+                unchanged.NotModified = true;
+                unchanged.Etag = etag;
+                return unchanged;
+            }
+
             if (!response.IsSuccessStatusCode)
             {
-                throw new TarkovApiException($"tarkov.dev ответил {(int)response.StatusCode}");
+                throw new TarkovApiException($"json.tarkov.dev ответил {(int)response.StatusCode} на {ITEMS_DATASET}");
             }
 
-            await using Stream stream = await response.Content.ReadAsStreamAsync(token);
-            using JsonDocument document = await JsonDocument.ParseAsync(stream, default, token);
+            using JsonDocument items = await ReadDocumentAsync(response, token);
+            Dictionary<string, string> itemNames = await FetchTranslationsAsync(ITEMS_DATASET, token);
+            Dictionary<string, string> traderNames = await FetchTraderNamesAsync(token);
 
-            return ParseResponse(document);
+            ItemsSnapshot snapshot = new ItemsSnapshot();
+            snapshot.Etag = response.Headers.ETag?.Tag ?? string.Empty;
+            snapshot.Items = ParseItems(items, itemNames, traderNames);
+
+            return snapshot;
         }
 
-        public static List<TarkovItem> ParseResponse(JsonDocument document)
+        public static List<TarkovItem> ParseItems(
+            JsonDocument document,
+            Dictionary<string, string> itemNames,
+            Dictionary<string, string> traderNames)
         {
-            if (document.RootElement.TryGetProperty("errors", out JsonElement errors))
-            {
-                throw new TarkovApiException(DescribeErrors(errors));
-            }
-
             if (!document.RootElement.TryGetProperty("data", out JsonElement data) ||
                 !data.TryGetProperty("items", out JsonElement items) ||
-                items.ValueKind != JsonValueKind.Array)
+                items.ValueKind != JsonValueKind.Object)
             {
-                throw new TarkovApiException("tarkov.dev вернул ответ без предметов");
+                throw new TarkovApiException("json.tarkov.dev вернул ответ без предметов");
             }
 
-            List<TarkovItem> parsed = new List<TarkovItem>(items.GetArrayLength());
-            foreach (JsonElement element in items.EnumerateArray())
+            List<TarkovItem> parsed = new List<TarkovItem>();
+            foreach (JsonProperty entry in items.EnumerateObject())
             {
-                parsed.Add(ParseItem(element));
+                parsed.Add(ParseItem(entry.Value, itemNames, traderNames));
             }
 
             if (parsed.Count == 0)
             {
-                throw new TarkovApiException("tarkov.dev вернул пустой список предметов");
+                throw new TarkovApiException("json.tarkov.dev вернул пустой список предметов");
             }
 
             return parsed;
         }
 
-        private static TarkovItem ParseItem(JsonElement element)
+        public static Dictionary<string, string> ParseTranslations(JsonDocument document)
+        {
+            Dictionary<string, string> translations = new Dictionary<string, string>();
+            if (!document.RootElement.TryGetProperty("data", out JsonElement data) || data.ValueKind != JsonValueKind.Object)
+            {
+                return translations;
+            }
+
+            foreach (JsonProperty entry in data.EnumerateObject())
+            {
+                if (entry.Value.ValueKind == JsonValueKind.String)
+                {
+                    translations[entry.Name] = entry.Value.GetString() ?? string.Empty;
+                }
+            }
+
+            return translations;
+        }
+
+        private async Task<Dictionary<string, string>> FetchTranslationsAsync(string dataset, CancellationToken token)
+        {
+            using HttpResponseMessage response = await _client.GetAsync(BuildUrl($"{dataset}_{LANGUAGE}"), HttpCompletionOption.ResponseHeadersRead, token);
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new TarkovApiException($"json.tarkov.dev ответил {(int)response.StatusCode} на перевод {dataset}");
+            }
+
+            using JsonDocument document = await ReadDocumentAsync(response, token);
+            return ParseTranslations(document);
+        }
+
+        private async Task<Dictionary<string, string>> FetchTraderNamesAsync(CancellationToken token)
+        {
+            Dictionary<string, string> translations = await FetchTranslationsAsync(TRADERS_DATASET, token);
+
+            Dictionary<string, string> names = new Dictionary<string, string>();
+            foreach (KeyValuePair<string, string> entry in translations)
+            {
+                if (!entry.Key.EndsWith(TRADER_NAME_SUFFIX, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                string traderId = entry.Key.Substring(0, entry.Key.Length - TRADER_NAME_SUFFIX.Length);
+                names[traderId] = entry.Value;
+            }
+
+            return names;
+        }
+
+        private static async Task<JsonDocument> ReadDocumentAsync(HttpResponseMessage response, CancellationToken token)
+        {
+            await using Stream stream = await response.Content.ReadAsStreamAsync(token);
+            return await JsonDocument.ParseAsync(stream, default, token);
+        }
+
+        private static TarkovItem ParseItem(
+            JsonElement element,
+            Dictionary<string, string> itemNames,
+            Dictionary<string, string> traderNames)
         {
             TarkovItem item = new TarkovItem();
             item.Id = ReadString(element, "id");
-            item.Name = ReadString(element, "name");
-            item.ShortName = ReadString(element, "shortName");
+            item.Name = Translate(ReadString(element, "name"), itemNames);
+            item.ShortName = Translate(ReadString(element, "shortName"), itemNames);
             item.NormalizedName = ReadString(element, "normalizedName");
             item.IconLink = ReadString(element, "iconLink");
             item.Link = ReadString(element, "link");
@@ -84,40 +162,35 @@ namespace Flow.Launcher.Plugin.Tarkov
             item.FleaAveragePrice = ReadInt(element, "avg24hPrice");
             item.BannedFromFlea = HasType(element, NO_FLEA_TYPE);
 
-            FillBestVendor(element, item);
+            FillBestVendor(element, traderNames, item);
 
             return item;
         }
 
-        private static void FillBestVendor(JsonElement element, TarkovItem item)
+        private static void FillBestVendor(JsonElement element, Dictionary<string, string> traderNames, TarkovItem item)
         {
-            if (!element.TryGetProperty("sellFor", out JsonElement offers) || offers.ValueKind != JsonValueKind.Array)
+            if (!element.TryGetProperty("sellToTrader", out JsonElement offers) || offers.ValueKind != JsonValueKind.Array)
             {
                 return;
             }
 
             foreach (JsonElement offer in offers.EnumerateArray())
             {
-                if (!offer.TryGetProperty("vendor", out JsonElement vendor))
-                {
-                    continue;
-                }
-
-                string vendorId = ReadString(vendor, "normalizedName");
-                if (vendorId == FLEA_MARKET_VENDOR)
-                {
-                    continue;
-                }
-
                 int price = ReadInt(offer, "priceRUB");
                 if (price <= item.VendorPrice)
                 {
                     continue;
                 }
 
+                string traderId = ReadString(offer, "trader");
                 item.VendorPrice = price;
-                item.VendorName = ReadString(vendor, "name");
+                item.VendorName = traderNames.TryGetValue(traderId, out string? name) ? name : traderId;
             }
+        }
+
+        private static string Translate(string key, Dictionary<string, string> translations)
+        {
+            return translations.TryGetValue(key, out string? translated) ? translated : key;
         }
 
         private static bool HasType(JsonElement element, string type)
@@ -158,21 +231,9 @@ namespace Flow.Launcher.Plugin.Tarkov
             return 0;
         }
 
-        private static string DescribeErrors(JsonElement errors)
+        private static string BuildUrl(string dataset)
         {
-            if (errors.ValueKind != JsonValueKind.Array || errors.GetArrayLength() == 0)
-            {
-                return "tarkov.dev вернул ошибку";
-            }
-
-            JsonElement first = errors[0];
-            if (first.ValueKind == JsonValueKind.String)
-            {
-                return first.GetString() ?? "tarkov.dev вернул ошибку";
-            }
-
-            string message = ReadString(first, "message");
-            return string.IsNullOrEmpty(message) ? "tarkov.dev вернул ошибку" : message;
+            return $"{BASE_URL}{GAME_MODE}/{dataset}";
         }
     }
 }
