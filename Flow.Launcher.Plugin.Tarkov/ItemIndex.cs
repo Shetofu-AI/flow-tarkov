@@ -6,6 +6,7 @@ namespace Flow.Launcher.Plugin.Tarkov
     public class ItemIndex
     {
         private static readonly TimeSpan CACHE_LIFETIME = TimeSpan.FromMinutes(30);
+        private static readonly TimeSpan RETRY_DELAY = TimeSpan.FromSeconds(30);
 
         private readonly TarkovApi _api;
         private readonly string _cachePath;
@@ -13,6 +14,7 @@ namespace Flow.Launcher.Plugin.Tarkov
 
         private List<TarkovItem> _items = new List<TarkovItem>();
         private DateTimeOffset _updatedAt = DateTimeOffset.MinValue;
+        private DateTimeOffset _blockedUntil = DateTimeOffset.MinValue;
         private Task? _refresh;
         private string _lastError = string.Empty;
 
@@ -60,7 +62,7 @@ namespace Flow.Launcher.Plugin.Tarkov
 
         public Task EnsureFreshAsync()
         {
-            if (!IsStale)
+            if (!IsStale || DateTimeOffset.UtcNow < _blockedUntil)
             {
                 return Task.CompletedTask;
             }
@@ -90,11 +92,13 @@ namespace Flow.Launcher.Plugin.Tarkov
                 PrepareSearchText(fetched);
                 _items = fetched;
                 _updatedAt = DateTimeOffset.UtcNow;
+                _blockedUntil = DateTimeOffset.MinValue;
                 _lastError = string.Empty;
                 SaveToDisk();
             }
             catch (Exception exception)
             {
+                _blockedUntil = DateTimeOffset.UtcNow + RETRY_DELAY;
                 _lastError = exception.Message;
             }
         }
